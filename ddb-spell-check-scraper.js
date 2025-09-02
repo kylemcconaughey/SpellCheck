@@ -1,24 +1,32 @@
 #!/usr/bin/env node
 // ddb-spell-check-scraper.js
-// Setup:
-//   npm init -y && npm install puppeteer
 // Run:
-//   node ddb-spell-check-scraper.js        # random page 1–14
-//   node ddb-spell-check-scraper.js 7      # force page 7
+//   npm init -y && npm install puppeteer
+//   node ddb-spell-check-scraper.js
+//   node ddb-spell-check-scraper.js 7   # force page 7
 
 const puppeteer = require('puppeteer');
 const readline = require('readline');
 const fs = require('fs');
 
+/* ---------- tiny color helpers (no deps) ---------- */
+const color = (code) => (s) => `\x1b[${code}m${s}\x1b[0m`;
+const bold = color(1), dim = color(2);
+const red = color(31), green = color(32), yellow = color(33);
+const blue = color(34), magenta = color(35), cyan = color(36), gray = color(90);
+const step = (n, of, msg) => console.log(`${dim(`[${n}/${of}]`)} ${cyan(msg)}`);
+const sep = () => console.log(gray('────────────────────────────────────────'));
+const header = (t) => console.log(bold(magenta(t)));
+/* -------------------------------------------------- */
+
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-const pause = (msg = '> ') => new Promise(res => rl.question(msg, () => res()));
+const pause = (msg = '> ') => new Promise(res => rl.question(dim(msg), () => res()));
 
 const FILTER_URL = 'https://www.dndbeyond.com/spells?filter-material=t&filter-partnered-content=f&filter-search=&filter-source=1&filter-source=136&filter-source=3&filter-source=49&filter-source=62&filter-source=133&filter-source=111&filter-source=8&filter-source=5&filter-source=89&filter-source=2&filter-source=67&filter-source=104&filter-source=35&filter-source=27&page=1';
 const TOTAL_PAGES = 14;
 const MAX_ATTEMPTS = 3;
 const STEP6_TIMEOUT_MS = 5000;
 
-// history (last 50) of {name,url,ts}
 const HISTORY_FILE = '.ddb-history.json';
 const MAX_HISTORY = 50;
 
@@ -82,7 +90,8 @@ const addToHistory = (hist, name, url) => {
 };
 
 (async () => {
-  console.log('[1/8] Launching browser...');
+  header('DDB Spell “Spellcheck!”');
+  step(1, 8, 'Launching browser…');
   const browser = await puppeteer.launch({
     headless: true,
     args: ['--no-sandbox', '--disable-setuid-sandbox', '--lang=en-US,en'],
@@ -95,24 +104,24 @@ const addToHistory = (hist, name, url) => {
   let history = loadHistory();
 
   try {
-    console.log('[2/8] Opening listing page...');
+    step(2, 8, 'Opening listing page…');
     const listUrl = getListUrl();
     await page.goto(listUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
     await maybeClickConsent(page);
 
-    console.log('[3/8] Waiting for spell lists...');
+    step(3, 8, 'Waiting for spell lists…');
     await page.waitForFunction(
       () => document.querySelectorAll('div.row.spell-name span.name a[href]').length > 0,
       { timeout: 30000 }
     );
 
-    console.log('[4/8] Collecting spell links...');
+    step(4, 8, 'Collecting spell links…');
     let spellLinks = await page.$$eval(
       'div.row.spell-name span.name a[href]',
       as => Array.from(new Set(as.map(a => a.href)))
     );
     if (!spellLinks.length) {
-      console.log('No spells found. Exiting.');
+      console.log(red('No spells found. Exiting.'));
       rl.close();
       await browser.close();
       process.exit(0);
@@ -123,11 +132,11 @@ const addToHistory = (hist, name, url) => {
     const shuffled = spellLinks.sort(() => Math.random() - 0.5);
     let candidates = shuffled.filter(u => !seen.has(u));
     if (candidates.length === 0) {
-      console.log('[4a] All links on this page were seen recently — allowing repeats.');
+      console.log(yellow(dim('[note] All links on this page were seen recently — allowing repeats.')));
       candidates = shuffled;
     } else {
       const skipped = shuffled.length - candidates.length;
-      if (skipped > 0) console.log(`[4a] Skipping ${skipped} seen link(s).`);
+      if (skipped > 0) console.log(dim(gray(`[skip] ${skipped} recently seen link(s)`)));
     }
 
     let data = null;
@@ -138,19 +147,19 @@ const addToHistory = (hist, name, url) => {
       spellUrl = candidates[attempt];
       attempt += 1;
 
-      console.log(`[5/8] Opening random spell page... (attempt ${attempt}/${MAX_ATTEMPTS})`);
+      step(5, 8, `Opening random spell page… ${dim(`(attempt ${attempt}/${MAX_ATTEMPTS})`)}`);
       const sp = await browser.newPage();
       await sp.setUserAgent('Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36');
 
       const resp = await sp.goto(spellUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => null);
       await maybeClickConsent(sp);
       if (!resp || resp.status() >= 400) {
-        console.log(`[5a] HTTP ${resp ? resp.status() : 'ERR'} — trying another spell.`);
+        console.log(yellow(`[warn] HTTP ${resp ? resp.status() : 'ERR'} — trying another spell.`));
         await sp.close();
         continue;
       }
 
-      console.log('[6/8] Waiting for data elements to appear...');
+      step(6, 8, 'Waiting for data elements to appear…');
       const targetSelectors = [
         'h1.page-title',
         '.components-blurb',
@@ -163,14 +172,14 @@ const addToHistory = (hist, name, url) => {
         .catch(() => false);
 
       if (!appeared) {
-        console.log('[6a] Timed out waiting — trying another spell.');
+        console.log(yellow('[warn] Timed out waiting — trying another spell.'));
         await sp.close();
         continue;
       }
 
       await delay(600);
 
-      console.log('[7/8] Extracting spell info...');
+      step(7, 8, 'Extracting spell info…');
       data = await sp.evaluate(() => {
         const text = (el) => (el?.textContent || '').replace(/\s+/g, ' ').trim();
 
@@ -215,15 +224,15 @@ const addToHistory = (hist, name, url) => {
       await sp.close();
 
       if (!data || !data.components) {
-        console.log('[7a] Missing components — trying another spell.');
+        console.log(yellow('[warn] Missing components — trying another spell.'));
         data = null;
       }
     }
 
     if (!data) {
-      console.log('-----');
-      console.log('No accessible spell found after 3 attempts. Exiting gracefully.');
-      console.log('-----');
+      sep();
+      console.log(red('No accessible spell found after 3 attempts. Exiting gracefully.'));
+      sep();
       rl.close();
       await browser.close();
       process.exit(0);
@@ -234,21 +243,22 @@ const addToHistory = (hist, name, url) => {
 
     const cleanedComponents = cleanComponents(data.components);
 
-    console.log('\n-----');
-    console.log(`Components: ${cleanedComponents}`);
-    await pause('Press Enter to reveal level & school… ');
-    console.log(data.level || '');
-    console.log(data.school || '');
+    console.log();
+    sep();
+    console.log(`${bold(cyan('Components'))}\n  ${cleanedComponents}`);
+    await pause('\nPress Enter to reveal level & school… ');
+    console.log(`${bold(cyan('Level'))}\n  ${green(data.level || '')}`);
+    console.log(`${bold(cyan('School'))}\n  ${green(data.school || '')}`);
     const initials = initialsFromName(data.name);
     if (initials) {
-      await pause('Press Enter to the first letter(s) of the spell… ');
-      console.log(`Hint — initials: ${initials}`);
+      await pause('\nPress Enter to the first letter(s) of the spell… ');
+      console.log(`${bold(cyan('Hint'))}\n  ${yellow(`Initials: ${initials}`)}`);
     }
-    await pause('Press Enter to reveal spell name… ');
-    console.log(data.name || '');
-    console.log('-----\n');
-
-    console.log('[8/8] Done');
+    await pause('\nPress Enter to reveal spell name… ');
+    console.log(`${bold(cyan('Spell'))}\n  ${magenta(bold(data.name || ''))}`);
+    sep();
+    console.log();
+    step(8, 8, green('Done'));
   } finally {
     rl.close();
     await browser.close();
