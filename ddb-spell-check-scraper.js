@@ -8,14 +8,19 @@
 
 const puppeteer = require('puppeteer');
 const readline = require('readline');
+const fs = require('fs');
 
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 const pause = (msg = '> ') => new Promise(res => rl.question(msg, () => res()));
 
 const FILTER_URL = 'https://www.dndbeyond.com/spells?filter-material=t&filter-partnered-content=f&filter-search=&filter-source=1&filter-source=136&filter-source=3&filter-source=49&filter-source=62&filter-source=133&filter-source=111&filter-source=8&filter-source=5&filter-source=89&filter-source=2&filter-source=67&filter-source=104&filter-source=35&filter-source=27&page=1';
 const TOTAL_PAGES = 14;
-const MAX_ATTEMPTS = 3;       // total tries per run
-const STEP6_TIMEOUT_MS = 5000; // 5s per your request
+const MAX_ATTEMPTS = 3;
+const STEP6_TIMEOUT_MS = 5000;
+
+// history (last 50) of {name,url,ts}
+const HISTORY_FILE = '.ddb-history.json';
+const MAX_HISTORY = 50;
 
 const delay = (ms) => new Promise(res => setTimeout(res, ms));
 const randInt = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
@@ -55,6 +60,27 @@ const cleanComponents = (s) => {
   return t;
 };
 
+const loadHistory = () => {
+  try {
+    const raw = fs.readFileSync(HISTORY_FILE, 'utf8');
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr : [];
+  } catch { return []; }
+};
+
+const saveHistory = (arr) => {
+  try { fs.writeFileSync(HISTORY_FILE, JSON.stringify(arr.slice(0, MAX_HISTORY), null, 2)); } catch {}
+};
+
+const addToHistory = (hist, name, url) => {
+  const entry = { name, url, ts: Date.now() };
+  const dedup = hist.filter(h => h.url !== url);
+  dedup.unshift(entry);
+  if (dedup.length > MAX_HISTORY) dedup.length = MAX_HISTORY;
+  saveHistory(dedup);
+  return dedup;
+};
+
 (async () => {
   console.log('[1/8] Launching browser...');
   const browser = await puppeteer.launch({
@@ -65,6 +91,8 @@ const cleanComponents = (s) => {
 
   const page = await browser.newPage();
   await page.setUserAgent('Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36');
+
+  let history = loadHistory();
 
   try {
     console.log('[2/8] Opening listing page...');
@@ -89,14 +117,25 @@ const cleanComponents = (s) => {
       await browser.close();
       process.exit(0);
     }
-    // Shuffle so retries try different spells
-    spellLinks = spellLinks.sort(() => Math.random() - 0.5);
+
+    // Skip recently seen URLs
+    const seen = new Set(history.map(h => h.url));
+    const shuffled = spellLinks.sort(() => Math.random() - 0.5);
+    let candidates = shuffled.filter(u => !seen.has(u));
+    if (candidates.length === 0) {
+      console.log('[4a] All links on this page were seen recently — allowing repeats.');
+      candidates = shuffled;
+    } else {
+      const skipped = shuffled.length - candidates.length;
+      if (skipped > 0) console.log(`[4a] Skipping ${skipped} seen link(s).`);
+    }
 
     let data = null;
+    let spellUrl = null;
     let attempt = 0;
 
-    while (attempt < Math.min(MAX_ATTEMPTS, spellLinks.length) && !data) {
-      const spellUrl = spellLinks[attempt];
+    while (attempt < Math.min(MAX_ATTEMPTS, candidates.length) && !data) {
+      spellUrl = candidates[attempt];
       attempt += 1;
 
       console.log(`[5/8] Opening random spell page... (attempt ${attempt}/${MAX_ATTEMPTS})`);
@@ -118,7 +157,6 @@ const cleanComponents = (s) => {
         '.ddb-statblock-item',
         '[class*="ddb-statblock-item-"]',
       ];
-
       const appeared = await sp
         .waitForFunction((sels) => sels.some(sel => !!document.querySelector(sel)), { timeout: STEP6_TIMEOUT_MS }, targetSelectors)
         .then(() => true)
@@ -176,7 +214,6 @@ const cleanComponents = (s) => {
 
       await sp.close();
 
-      // If components missing, treat as failure and retry
       if (!data || !data.components) {
         console.log('[7a] Missing components — trying another spell.');
         data = null;
@@ -185,12 +222,15 @@ const cleanComponents = (s) => {
 
     if (!data) {
       console.log('-----');
-      console.log('No accessible spell found after 3 attempts. Exiting.');
+      console.log('No accessible spell found after 3 attempts. Exiting gracefully.');
       console.log('-----');
       rl.close();
       await browser.close();
       process.exit(0);
     }
+
+    // Update history with successful result
+    history = addToHistory(history, data.name || '(unknown)', spellUrl);
 
     const cleanedComponents = cleanComponents(data.components);
 
