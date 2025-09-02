@@ -1,0 +1,16 @@
+{
+  "name": "spell-check",
+  "version": "1.0.0",
+  "main": "ddb-spell-check-scraper.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "spellcheck": "node ddb-spell-check-scraper.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "puppeteer": "^24.18.0"
+  }
+}
